@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from fastapi import FastAPI, HTTPException
 
+from .cleanup import CleanupAuditError, audit_cleanup
 from .engine import compute
 from .color_mix import ColorMixError, mix_colors
 from .counters import CounterRenderError, render_counter_tree
@@ -13,6 +14,8 @@ from .math_eval import MathEvaluationError, evaluate_math
 from .models import (
     ColorMixRequest,
     ColorMixResponse,
+    CleanupAuditRequest,
+    CleanupAuditResponse,
     ComputePreviewResponse,
     ComputeRequest,
     ComputeResponse,
@@ -37,8 +40,8 @@ app = FastAPI(
     title="CSS Cascade Explainer",
     version="1.0.0",
     description="CSS 层叠解释 API：按来源 / 层 / important / 特异性 / 源码次序计算声明胜出者，"
-    "解析自定义属性与 var()，并给出逐步淘汰证据；另含选择器可命中性判断、"
-    " CSS 数值属性关键帧采样、CSS 计数器元素树渲染、CSS 数学表达式求值、"
+    "解析自定义属性与 var()，并给出逐步淘汰证据；支持整棵 DOM 样本上的声明清理审计、"
+    "选择器可命中性判断、 CSS 数值属性关键帧采样、CSS 计数器元素树渲染、CSS 数学表达式求值、"
     "单行 CSS Grid 列宽求解、color-mix() 风格两色混合与 OKLCH -> sRGB 色域映射。",
 )
 
@@ -64,6 +67,17 @@ def compute_endpoint(req: ComputeRequest) -> ComputeResponse:
     except SelectorSyntaxError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except PatchError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/cleanup-audit", response_model=CleanupAuditResponse)
+def cleanup_audit_endpoint(req: CleanupAuditRequest) -> CleanupAuditResponse:
+    """在整棵 DOM 样本上审计可同时删除且不改变 computed、自定义属性或 invalid 的声明。"""
+    try:
+        return audit_cleanup(req)
+    except SelectorSyntaxError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except CleanupAuditError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 

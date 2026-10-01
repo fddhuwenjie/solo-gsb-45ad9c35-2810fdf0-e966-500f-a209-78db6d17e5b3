@@ -221,6 +221,80 @@ class ComputePreviewResponse(ComputeResponse):
     preview: ComputePreview
 
 
+# ---------- POST /cleanup-audit ----------
+
+
+class CleanupNode(BaseModel):
+    """样式清理审计用 DOM 样本树节点。id 在整棵树中必须唯一。"""
+
+    id: Union[str, int]
+    tag: str
+    classes: list[str] = Field(default_factory=list)
+    attributes: dict[str, str] = Field(default_factory=dict)
+    children: list["CleanupNode"] = Field(default_factory=list)
+
+    @field_validator("id", mode="before")
+    @classmethod
+    def _id_type(cls, v):
+        if isinstance(v, bool) or not isinstance(v, (str, int)):
+            raise ValueError("节点 id 必须为非空字符串或整数")
+        if isinstance(v, str) and not v.strip():
+            raise ValueError("节点 id 不能为空字符串")
+        return v
+
+    @field_validator("tag")
+    @classmethod
+    def _tag_not_empty(cls, v):
+        if not v.strip():
+            raise ValueError("节点 tag 不能为空")
+        return v
+
+    @field_validator("classes")
+    @classmethod
+    def _classes_valid(cls, values):
+        if any(not isinstance(value, str) or not value.strip() for value in values):
+            raise ValueError("class 必须为非空字符串")
+        return values
+
+    @field_validator("attributes")
+    @classmethod
+    def _attributes_valid(cls, values):
+        for key in values:
+            if not key.strip():
+                raise ValueError("属性名不能为空")
+        return values
+
+
+class CleanupAuditRequest(BaseModel):
+    """整棵 DOM 样本上的声明清理审计请求。"""
+
+    root: CleanupNode
+    layers: list[str] = Field(default_factory=list)
+    rules: list[Rule] = Field(default_factory=list)
+
+
+class DeclarationRefOut(BaseModel):
+    """一条既有声明的定位。"""
+
+    rule_index: int
+    declaration_index: int
+
+
+class RetainedDeclarationOut(DeclarationRefOut):
+    """不能纳入当前删除批次的声明及其首个冲突点。"""
+
+    node_id: Union[str, int]
+    property: str
+    reason: str
+
+
+class CleanupAuditResponse(BaseModel):
+    """实际可同时删除的声明批次，以及逐条保留原因。"""
+
+    removable: list[DeclarationRefOut]
+    retained: list[RetainedDeclarationOut]
+
+
 # ---------- POST /selector-overlap ----------
 
 

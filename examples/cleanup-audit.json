@@ -1,0 +1,41 @@
+{
+  "root": {
+    "id": "app",
+    "tag": "div",
+    "classes": ["dark"],
+    "attributes": {},
+    "children": [
+      {
+        "id": "lead",
+        "tag": "p",
+        "classes": ["text"],
+        "attributes": {"data-role": "lead"},
+        "children": []
+      }
+    ]
+  },
+  "layers": ["reset", "base"],
+  "rules": [
+    {
+      "selector": ".dark",
+      "declarations": [
+        {"property": "--brand", "value": "#06f"},
+        {"property": "--unused", "value": "4px"}
+      ]
+    },
+    {
+      "selector": "p.text",
+      "layer": "base",
+      "declarations": [
+        {"property": "color", "value": "var(--brand)"},
+        {"property": "color", "value": "red"}
+      ]
+    },
+    {
+      "selector": ".does-not-match",
+      "declarations": [
+        {"property": "padding", "value": "10px"}
+      ]
+    }
+  ]
+}
