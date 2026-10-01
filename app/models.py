@@ -785,3 +785,100 @@ class GamutMapResponse(BaseModel):
     rgba: dict  # 最终 rgba：整数 r/g/b（0..255）、alpha（0..1）与 css 字符串
     rounds: list[GamutMapRoundOut]  # 二分查找的每轮上下界（未映射时为空）
     trace: list[str]  # 中文逐步轨迹
+
+
+# ---------- POST /stylesheet-audit ----------
+
+
+class AuditElement(BaseModel):
+    """样式表清理审计的 DOM 样本树节点。
+
+    id 全树唯一（非空字符串或整数）；tag 必填且非空；classes / attributes
+    缺省为空；children 缺省为空数组（不允许 null）。
+    """
+
+    id: object
+    tag: str
+    classes: list[str] = Field(default_factory=list)
+    attributes: dict[str, str] = Field(default_factory=dict)
+    children: list["AuditElement"] = Field(default_factory=list)
+
+    @field_validator("id", mode="before")
+    @classmethod
+    def _id_type(cls, v):
+        if isinstance(v, bool) or not isinstance(v, (str, int)):
+            raise ValueError("节点 id 必须为非空字符串或整数")
+        if isinstance(v, str) and not v.strip():
+            raise ValueError("节点 id 不能为空字符串")
+        return v
+
+    @field_validator("tag")
+    @classmethod
+    def _tag_not_empty(cls, v):
+        if not v or not v.strip():
+            raise ValueError("节点 tag 不能为空")
+        return v
+
+    @field_validator("classes", mode="before")
+    @classmethod
+    def _classes_must_be_list(cls, v):
+        if v is None:
+            raise ValueError("classes 不能为 null，无类名时给空数组 []")
+        return v
+
+    @field_validator("children", mode="before")
+    @classmethod
+    def _children_must_be_list(cls, v):
+        if v is None:
+            raise ValueError("children 不能为 null，叶子节点给空数组 []")
+        return v
+
+
+class StylesheetAuditRequest(BaseModel):
+    """样式表清理审计请求。
+
+    root 为 DOM 样本树根（节点含唯一 id、tag、classes、attributes、children）；
+    layers 为层声明顺序（早 -> 晚）；rules 为现有结构化规则（同 /compute）。
+    """
+
+    root: AuditElement
+    layers: list[str] = Field(default_factory=list)
+    rules: list[Rule] = Field(default_factory=list)
+
+
+class DeletedDeclarationOut(BaseModel):
+    """实际纳入删除批次的一条声明（按 rule_index、declaration_index 排序）。"""
+
+    rule_index: int
+    declaration_index: int
+    property: str
+    selector: str
+
+
+class RetainedDeclarationOut(BaseModel):
+    """必须保留的一条声明及其首个阻断证据。
+
+    reason 代码：
+      - winner_changed：删除后该属性的层叠胜出声明换人（含该属性整体消失）；
+      - new_invalid：删除后原本 computed 的属性 / 自定义属性变为 invalid；
+      - invalid_cleared：删除后原本 invalid 的状态被解除；
+      - value_changed：胜出声明相同，但 var() / 继承链取值发生变化；
+      - status_changed：自定义属性 ok ↔ invalid 切换（胜出声明相同）。
+    conflict_node 为按先序遍历找到的首个冲突节点 id；
+    custom_properties / computed / invalid 三类节点状态任一变化即视为阻断。
+    """
+
+    rule_index: int
+    declaration_index: int
+    property: str
+    selector: str
+    conflict_node: object
+    conflict_property: str
+    reason: str
+    detail: str
+
+
+class StylesheetAuditResponse(BaseModel):
+    nodes_checked: int
+    deleted: list[DeletedDeclarationOut]
+    retained: list[RetainedDeclarationOut]

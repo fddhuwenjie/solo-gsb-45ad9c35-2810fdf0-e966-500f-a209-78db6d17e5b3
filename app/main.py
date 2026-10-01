@@ -4,6 +4,7 @@ from __future__ import annotations
 from fastapi import FastAPI, HTTPException
 
 from .engine import compute
+from .audit import AuditValidationError, audit_stylesheet
 from .color_mix import ColorMixError, mix_colors
 from .counters import CounterRenderError, render_counter_tree
 from .gamut_map import GamutMapError, gamut_map
@@ -28,6 +29,8 @@ from .models import (
     MathEvaluateResponse,
     OverlapRequest,
     OverlapResponse,
+    StylesheetAuditRequest,
+    StylesheetAuditResponse,
 )
 from .overlap import selector_overlap
 from .preview import PatchError, compute_with_preview
@@ -39,7 +42,8 @@ app = FastAPI(
     description="CSS 层叠解释 API：按来源 / 层 / important / 特异性 / 源码次序计算声明胜出者，"
     "解析自定义属性与 var()，并给出逐步淘汰证据；另含选择器可命中性判断、"
     " CSS 数值属性关键帧采样、CSS 计数器元素树渲染、CSS 数学表达式求值、"
-    "单行 CSS Grid 列宽求解、color-mix() 风格两色混合与 OKLCH -> sRGB 色域映射。",
+    "单行 CSS Grid 列宽求解、color-mix() 风格两色混合、OKLCH -> sRGB 色域映射，"
+    "以及在 DOM 样本树上逐节点审计可安全删除声明批次的样式表清理。",
 )
 
 
@@ -64,6 +68,21 @@ def compute_endpoint(req: ComputeRequest) -> ComputeResponse:
     except SelectorSyntaxError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except PatchError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/stylesheet-audit", response_model=StylesheetAuditResponse)
+def stylesheet_audit_endpoint(req: StylesheetAuditRequest) -> StylesheetAuditResponse:
+    """样式表清理审计：在 DOM 样本树上逐节点复用选择器匹配与层叠 / var()
+    求值，按 rule_index、declaration_index 顺序逐条试删并重新计算整棵树，
+    返回实际可同时删除的声明批次，以及每个保留声明的首个冲突节点、属性与
+    阻断原因。删除后出现新失效、解除原失效或改变胜出者的声明不纳入批次。
+    重复 id、空节点或非法规则返回 422。"""
+    try:
+        return audit_stylesheet(req)
+    except SelectorSyntaxError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except AuditValidationError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 

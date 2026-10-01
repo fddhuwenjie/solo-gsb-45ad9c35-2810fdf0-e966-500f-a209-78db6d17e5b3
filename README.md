@@ -12,6 +12,7 @@ docker compose up --build
 服务启动后监听 **8000** 端口：
 
 - `POST /compute` — 层叠计算；携带 `patches` 时返回样式变更预演（基线 / 补丁后结果、逐项差异、因果轨迹与未生效补丁）
+- `POST /stylesheet-audit` — 样式表清理审计：在 DOM 样本树上逐节点复用选择器与层叠 / `var()` 求值，找出可同时删除而不改变任何节点 computed、custom_properties 或 invalid 状态的声明批次
 - `POST /selector-overlap` — 不提供 DOM 样本，判断两条选择器能否命中同一元素
 - `POST /keyframe-sample` — CSS 数值属性关键帧采样
 - `POST /counter-render` — CSS 计数器元素树渲染（counter-reset/set/increment 与 counter()/counters()）
@@ -257,6 +258,99 @@ p 上的自定义属性 --b：【补丁后】p 上 --a ↔ --b 形成循环依�
   的声明数；
 - 两条补丁定位到同一条声明；
 - 补丁未携带任何修改（`value` / `important` / `layer` 均缺省）。
+
+## POST /stylesheet-audit：样式表清理审计
+
+给定一棵 **DOM 样本树**（每个节点含全树唯一的 `id`、`tag`、`classes`、
+`attributes`、`children`）、层声明顺序 `layers` 与现有结构化规则 `rules`，
+审计哪些声明可以**同时删除**而不改变样本树上任何节点的 `computed`、
+`custom_properties` 或 `invalid` 状态。
+
+判定过程与 `/compute` 完全同一套引擎：逐节点以「根 → … → 父」祖先链做
+选择器匹配，按来源 / 层 / important / 特异性 / 源码次序层叠，自定义属性
+沿树**继承**、检测**循环依赖**并按 **fallback** 解析 `var()`。审计按
+`rule_index`、`declaration_index` 顺序**逐条把声明加入删除候选并重新计算
+整棵树**：删除后所有节点的下列签名均与基线一致，才真正纳入批次（贪心累积，
+后续试删在已删批次之上进行）：
+
+- 普通属性：胜出声明定位 `(rule_index, declaration_index)`、
+  `computed` / `invalid` 状态与取值；
+- 自定义属性：本元素胜出声明定位（纯继承为 `null`）、
+  `ok` / `invalid` / `missing` 状态与解析值（**含只继承、本元素未声明的**）。
+
+因此删除后出现新的失效（变量缺失、循环形成 / 解除、fallback 改道失败）、
+原本 invalid 被解除、层叠胜出者换人（**即使继任者取值恰好相同**）、或经
+继承 / `var()` 链传导的任何取值变化，都会阻断该声明进入批次。
+
+```bash
+curl -X POST http://localhost:8000/stylesheet-audit \
+  -H 'Content-Type: application/json' \
+  -d @examples/stylesheet-audit.json
+```
+
+`examples/stylesheet-audit.json` 的样本树为 `div#app.dark > (h1#title,
+p.text#lead > code#code)`。响应（节选）：
+
+```json
+{
+  "nodes_checked": 4,
+  "deleted": [
+    {"rule_index": 1, "declaration_index": 0, "property": "--gap", "selector": "div"},
+    {"rule_index": 3, "declaration_index": 0, "property": "color", "selector": "p.text"},
+    {"rule_index": 3, "declaration_index": 1, "property": "color", "selector": "p.text"},
+    {"rule_index": 7, "declaration_index": 0, "property": "color", "selector": "aside"}
+  ],
+  "retained": [
+    {"rule_index": 0, "declaration_index": 0, "property": "margin",
+     "conflict_node": "app", "conflict_property": "margin",
+     "reason": "winner_changed",
+     "detail": "margin 的胜出声明（规则 0 第 0 条，原值 '0'）被删除后该属性不再有任何声明胜出"},
+    {"rule_index": 1, "declaration_index": 1, "property": "--ring",
+     "conflict_node": "app", "conflict_property": "--ring",
+     "reason": "winner_changed",
+     "detail": "自定义属性 --ring（原来源：规则 1 第 1 条，值 '12px'）在删除后于该节点链上彻底消失（missing）"}
+  ]
+}
+```
+
+上例体现的要点：
+
+- 规则 1 的 `--gap: 8px` 可删：它在所有命中节点都被更高特异性的
+  `div.dark { --gap: 12px }` 遮蔽，删除后 `--ring: var(--gap)` 仍解析为
+  `12px`、`code` 的 `color: var(--gap)` 也不变——自定义属性继承与 `var()`
+  依赖被完整复算；
+- 规则 3 的两条 `color` 落选声明可删（分别败给同规则后者与属性选择器规则），
+  但胜出的 `color: navy` / `teal` 必须保留；
+- 即使没有任何属性引用 `--unused: 2px`，它仍必须保留：它出现在 `div` 的
+  `custom_properties` 中，删除会改变该节点的自定义属性集合；
+- 规则 7 的 `aside { color: pink }` 可删：选择器不命中样本树任何节点。
+
+### 响应字段
+
+- `nodes_checked`：参与比对的样本节点数（先序遍历）；
+- `deleted[]`：**实际可删批次**，按 `rule_index`、`declaration_index` 排序，
+  每项回显 `property` 与 `selector`。该批次可一次性整体删除，删除后整棵树的
+  computed / custom_properties / invalid 与基线逐节点一致；
+- `retained[]`：每个保留声明同样按定位排序，并给出首个阻断证据：
+  - `conflict_node`：按**先序遍历**找到的首个发生变化的节点 `id`
+    （同一声明在多个节点胜出时取最早者，通常即胜出节点自身）；
+  - `conflict_property`：首个冲突的普通属性或自定义属性名；
+  - `reason`：阻断类别——`winner_changed`（胜出者换人或属性消失 / 新增）、
+    `new_invalid`（删除后新出现失效）、`invalid_cleared`（原失效被解除）、
+    `value_changed`（胜出者不变但 `var()` / 继承取值变化）、
+    `status_changed`（自定义属性 ok ↔ invalid 切换）；
+  - `detail`：中文阻断说明（含基线 / 删除后的胜出定位与取值）。
+
+### 审计校验（HTTP 422）
+
+- 节点 `id` 缺失、为空字符串、为布尔，或树中存在**重复 id**；
+- 节点 `tag` 缺失 / 为空白；`children` 或 `classes` 为 `null`
+  （叶子节点给空数组 `[]`）；
+- 规则选择器语法非法（与 `/compute` 同一套选择器语法）；
+- 声明的 `property` 为空白。
+
+不带该请求体的 `/compute` 及其余接口、`docker compose up --build`
+启动方式均保持不变。
 
 ## POST /selector-overlap：选择器可命中性判断
 
@@ -1105,10 +1199,10 @@ g/b 为负），需要映射；固定 L=0.7、h=30°、alpha=0.8 二分 15 轮�
 
 ```
 app/
-  main.py       FastAPI 入口（POST /compute、POST /selector-overlap、
-                POST /keyframe-sample、POST /counter-render、
-                POST /math-evaluate、POST /grid-tracks、POST /color-mix、
-                POST /gamut-map、GET /health）
+  main.py       FastAPI 入口（POST /compute、POST /stylesheet-audit、
+                POST /selector-overlap、POST /keyframe-sample、
+                POST /counter-render、POST /math-evaluate、POST /grid-tracks、
+                POST /color-mix、POST /gamut-map、GET /health）
   models.py     请求 / 响应模型
   selector.py   选择器解析与匹配、特异性计算
   overlap.py    选择器可命中性对齐搜索与冲突诊断
@@ -1128,8 +1222,11 @@ app/
   engine.py     计算编排（_solve 产出带完整轨迹的世界，compute 输出旧版响应）
   preview.py    样式变更预演：补丁校验 / 基线与补丁后复算 / 留一法归因 /
                 因果依赖图最短路与 shadowed 判定
+  audit.py      样式表清理审计：样本树校验展平、逐节点签名与按序
+                贪心试删（整树重算）、首个冲突节点与阻断原因诊断
 tests/test_cascade.py     /compute 端到端测试
 tests/test_preview.py     /compute 样式变更预演（patches）端到端测试
+tests/test_stylesheet_audit.py /stylesheet-audit 端到端测试
 tests/test_overlap.py     /selector-overlap 端到端测试
 tests/test_keyframe.py    /keyframe-sample 端到端测试
 tests/test_counters.py    /counter-render 端到端测试
@@ -1139,6 +1236,7 @@ tests/test_color_mix.py   /color-mix 端到端测试
 tests/test_gamut_map.py   /gamut-map 端到端测试
 examples/request.json          /compute 示例请求
 examples/preview.json           /compute 样式变更预演示例请求（携带 patches）
+examples/stylesheet-audit.json  /stylesheet-audit 示例请求
 examples/keyframe-sample.json  /keyframe-sample 示例请求
 examples/counter-render.json   /counter-render 示例请求
 examples/math-evaluate.json    /math-evaluate 示例请求

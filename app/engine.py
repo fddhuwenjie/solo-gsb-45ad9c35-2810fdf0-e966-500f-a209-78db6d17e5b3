@@ -107,23 +107,36 @@ class _World:
     custom_winners: dict  # 目标元素本元素胜出的自定义属性 {prop: Candidate}
 
 
-def _solve(
-    element: ElementInfo,
-    ancestors: list[ElementInfo],
-    layers: list[str],
-    rules: list,
-    layer_overrides: dict[tuple[int, int], str | None] | None = None,
-) -> _World:
-    layer_overrides = layer_overrides or {}
-    layer_index = _resolve_layer_order(layers, rules, layer_overrides)
+def _parse_rules(rules):
+    """预解析所有规则的选择器并计算特异性 / 源码次序。
 
-    # 预解析所有规则的选择器
+    同一份 rules 被多元素 / 多次试删复算复用时，解析结果可复用
+    （声明删除只影响候选收集，不改变选择器与规则次序）。
+    """
     parsed = []
     for idx, rule in enumerate(rules):
         compounds, combinators = parse_selector(rule.selector)
         spec = selector_specificity(compounds)
         order = rule.order if rule.order is not None else idx
         parsed.append((rule, order, compounds, combinators, spec))
+    return parsed
+
+
+def _solve(
+    element: ElementInfo,
+    ancestors: list[ElementInfo],
+    layers: list[str],
+    rules: list,
+    layer_overrides: dict[tuple[int, int], str | None] | None = None,
+    disabled: frozenset[tuple[int, int]] | set[tuple[int, int]] | None = None,
+    parsed: list | None = None,
+) -> _World:
+    layer_overrides = layer_overrides or {}
+    layer_index = _resolve_layer_order(layers, rules, layer_overrides)
+
+    # 预解析所有规则的选择器（可由调用方传入以在整树复算间复用）
+    if parsed is None:
+        parsed = _parse_rules(rules)
 
     def candidates_for(el: ElementInfo, el_ancestors: list[ElementInfo], custom: bool):
         result: list[Candidate] = []
@@ -131,6 +144,9 @@ def _solve(
             if not selector_matches(compounds, combinators, el, el_ancestors):
                 continue
             for di, decl in enumerate(rule.declarations):
+                # 样式表清理审计：已纳入删除批次的声明不参与层叠
+                if disabled is not None and (ri, di) in disabled:
+                    continue
                 is_custom = decl.property.startswith("--")
                 if is_custom != custom:
                     continue
